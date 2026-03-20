@@ -6,8 +6,6 @@ Export the [CorridorKey](https://github.com/nikopueringer/CorridorKey) green-scr
 
 - **Python 3.12**
 
-Everything is listed in `requirements.txt`, so a single `pip install` covers it all.
-
 ## Quick start
 
 ```bash
@@ -45,6 +43,22 @@ python export_and_run_openvino.py --device GPU
 ```
 
 If you don't pass `--image` or `--video`, the script generates a synthetic green-screen video (60 frames) and processes it as a quick demo.
+
+## Choosing `--img-size`
+
+`--img-size` controls the **internal processing resolution** — your input and output always keep their original dimensions. The pipeline resizes every frame to `img_size × img_size` before the model, then scales the result back with Lanczos4 interpolation.
+
+**Constraint:** the value must be a **multiple of 32** (required by the Hiera encoder's patch embedding stride of 4 and mask-unit size of 8 tokens: 4 × 8 = 32). Any other value will cause a runtime error.
+
+| `--img-size` | Pos-embed tokens | Use case |
+|---|---|---|
+| **512** | 16,384 | Quick preview / testing |
+| **1024** (script default) | 65,536 | Good quality–speed balance, especially on CPU |
+| **2048** (original repo default) | 262,144 | Production quality, highest detail |
+
+Memory and compute scale **quadratically** with `--img-size` — doubling the size means ~4× more work.
+
+**For 4K video** use `--img-size 2048` for maximum quality, or `--img-size 1024` for a practical speed/quality trade-off on CPU.
 
 ## How it works
 
