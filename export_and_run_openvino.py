@@ -30,7 +30,7 @@ Usage::
     python export_and_run_openvino.py --video path/to/greenscreen.mp4 [--img-size 1024]
 
 If neither ``--image`` nor ``--video`` is given a synthetic green-screen
-video (60 frames) is generated and processed as a demo.
+image is generated and processed as a demo.
 """
 
 from __future__ import annotations
@@ -38,7 +38,6 @@ from __future__ import annotations
 import argparse
 import logging
 import math
-import os
 import shutil
 import sys
 import time
@@ -82,13 +81,13 @@ def download_checkpoint(dest_dir: str | Path = "checkpoints") -> Path:
     dest_file = dest_dir / HF_CHECKPOINT_FILENAME
 
     if dest_file.exists():
-        logger.info("Checkpoint already present: %s", dest_file)
+        logger.info(f"Checkpoint already present: {dest_file}")
         return dest_file
 
-    logger.info("Downloading checkpoint from huggingface.co/%s …", HF_REPO_ID)
+    logger.info(f"Downloading checkpoint from huggingface.co/{HF_REPO_ID} …")
     cached = hf_hub_download(repo_id=HF_REPO_ID, filename=HF_CHECKPOINT_FILENAME)
     shutil.copy2(cached, dest_file)
-    logger.info("Saved checkpoint → %s", dest_file)
+    logger.info(f"Saved checkpoint → {dest_file}")
     return dest_file
 
 
@@ -117,7 +116,7 @@ def load_torch_model(checkpoint_path: Path, img_size: int, device: str = "cpu") 
     cleaned: dict[str, torch.Tensor] = {}
     for k, v in state_dict.items():
         if k.startswith("_orig_mod."):
-            k = k[len("_orig_mod."):]
+            k = k[len("_orig_mod.") :]
         if "pos_embed" in k and k in model_state and v.shape != model_state[k].shape:
             N_src, C = v.shape[1], v.shape[2]
             N_dst = model_state[k].shape[1]
@@ -137,11 +136,11 @@ def load_torch_model(checkpoint_path: Path, img_size: int, device: str = "cpu") 
 
     missing, unexpected = model.load_state_dict(cleaned, strict=False)
     if missing:
-        logger.warning("Missing keys: %s", missing)
+        logger.warning(f"Missing keys: {missing}")
     if unexpected:
-        logger.warning("Unexpected keys: %s", unexpected)
+        logger.warning(f"Unexpected keys: {unexpected}")
 
-    logger.info("PyTorch model loaded  (img_size=%d)", img_size)
+    logger.info(f"PyTorch model loaded  (img_size={img_size})")
     return model
 
 
@@ -161,7 +160,7 @@ def export_to_openvino(
     ir_path = output_dir / "corridorkey.xml"
 
     if ir_path.exists():
-        logger.info("OpenVINO IR already exists: %s", ir_path)
+        logger.info(f"OpenVINO IR already exists: {ir_path}")
         return ir_path
 
     logger.info("Exporting to OpenVINO IR …")
@@ -173,7 +172,7 @@ def export_to_openvino(
     ov_model = ov.convert_model(model, example_input=dummy)
 
     ov.save_model(ov_model, str(ir_path))
-    logger.info("OpenVINO IR saved → %s", ir_path)
+    logger.info(f"OpenVINO IR saved → {ir_path}")
     return ir_path
 
 
@@ -282,77 +281,71 @@ def make_synthetic_greenscreen(h: int = 720, w: int = 1280) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # 7. Video helpers
 # ---------------------------------------------------------------------------
-def make_synthetic_greenscreen_video(n_frames: int = 60, h: int = 720, w: int = 1280) -> list[np.ndarray]:
-    """Generate a synthetic green-screen video: a circle moving across a green background."""
-    frames: list[np.ndarray] = []
-    for i in range(n_frames):
-        img = np.zeros((h, w, 3), dtype=np.uint8)
-        img[:, :] = (0, 200, 0)  # BGR green
+def _iter_video_frames(video_path: str):
+    """Open a video file and yield frames one at a time.
 
-        # Animate a "person" moving horizontally
-        t = i / max(n_frames - 1, 1)
-        cx = int(w * 0.15 + (w * 0.70) * t)  # left→right
-        cy = h // 2
-        cv2.circle(img, (cx, cy - 80), 80, (180, 120, 70), -1)   # head
-        cv2.rectangle(img, (cx - 60, cy), (cx + 60, cy + 200), (200, 80, 60), -1)  # body
-        frames.append(img)
-    return frames
+    Returns:
+        (n_frames, height, width, fps, frame_iterator)
+        *n_frames* is an estimate from the container metadata (may be 0 if unknown).
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        sys.exit(f"Cannot open video: {video_path}")
+
+    vid_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+
+    def _gen():
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                yield frame
+        finally:
+            cap.release()
+
+    return n_frames, h, w, vid_fps, _gen()
 
 
 def process_video(
-    video_path: str | None,
+    video_path: str,
     compiled_model,
     img_size: int,
     output_dir: Path,
     fps: float | None = None,
 ) -> None:
-    """Read a video (or generate a synthetic one), run per-frame inference, write output videos."""
+    """Stream a video, running per-frame inference on the fly.
+
+    Frames are read one at a time and never stored in a list,
+    keeping memory usage constant regardless of video length.
+    """
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Read / generate frames ---
-    if video_path is not None:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            sys.exit(f"Cannot open video: {video_path}")
-        vid_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        frames: list[np.ndarray] = []
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frames.append(frame)
-        cap.release()
-        logger.info("Read %d frames from %s  (%.1f fps)", len(frames), video_path, vid_fps)
-    else:
-        logger.info("No --video supplied → generating synthetic green-screen video (60 frames)")
-        frames = make_synthetic_greenscreen_video()
-        vid_fps = 30.0
+    n_frames, orig_h, orig_w, vid_fps, frame_iter = _iter_video_frames(video_path)
+    logger.info(f"Opened {video_path}  ({orig_w}×{orig_h}, ~{n_frames} frames, {vid_fps:.1f} fps)")
 
     if fps is not None:
         vid_fps = fps
 
-    if not frames:
-        sys.exit("Video has no frames")
-
-    orig_h, orig_w = frames[0].shape[:2]
-
-    # --- Save the input video ---
+    # --- Prepare video writers ---
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     input_writer = cv2.VideoWriter(str(out_dir / "input.mp4"), fourcc, vid_fps, (orig_w, orig_h))
-    for frame in frames:
-        input_writer.write(frame)
-    input_writer.release()
-    logger.info("Saved input video → %s/input.mp4", out_dir)
-
-    # --- Prepare video writers ---
     alpha_writer = cv2.VideoWriter(str(out_dir / "alpha.mp4"), fourcc, vid_fps, (orig_w, orig_h), isColor=False)
     fg_writer = cv2.VideoWriter(str(out_dir / "foreground.mp4"), fourcc, vid_fps, (orig_w, orig_h))
     comp_writer = cv2.VideoWriter(str(out_dir / "composite.mp4"), fourcc, vid_fps, (orig_w, orig_h))
 
-    # --- Per-frame inference ---
+    # --- Single read-process-write loop ---
     total_ms = 0.0
-    for idx, frame_bgr in enumerate(frames):
+    n_processed = 0
+    for idx, frame_bgr in enumerate(frame_iter):
+        # Save original frame
+        input_writer.write(frame_bgr)
+
+        # Preprocess → infer → postprocess
         inp, h, w = preprocess(frame_bgr, img_size)
 
         t0 = time.perf_counter()
@@ -369,18 +362,64 @@ def process_video(
         fg_writer.write(fg_u8)
         comp_writer.write(comp_u8)
 
-        if (idx + 1) % 10 == 0 or idx == 0 or idx == len(frames) - 1:
-            logger.info("  frame %d/%d  (%.1f ms)", idx + 1, len(frames), dt * 1000)
+        n_processed = idx + 1
+        total_str = f"/{n_frames}" if n_frames else ""
+        if n_processed % 10 == 0 or idx == 0:
+            logger.info(f"  frame {n_processed}{total_str}  ({dt * 1000:.1f} ms)")
 
+    input_writer.release()
     alpha_writer.release()
     fg_writer.release()
     comp_writer.release()
 
-    avg_ms = total_ms / len(frames)
+    if n_processed == 0:
+        sys.exit("Video has no frames")
+
+    avg_ms = total_ms / n_processed
     logger.info(
-        "Video done: %d frames, avg %.1f ms/frame (%.1f fps).  Saved to %s/",
-        len(frames), avg_ms, 1000.0 / avg_ms, out_dir,
+        f"Video done: {n_processed} frames, avg {avg_ms:.1f} ms/frame ({1000.0 / avg_ms:.1f} fps).  Saved to {out_dir}/"
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. Single-image inference
+# ---------------------------------------------------------------------------
+def process_image(
+    image_path: str,
+    compiled_model,
+    img_size: int,
+    output_dir: Path,
+) -> None:
+    """Run inference on a single green-screen image and save results."""
+    image_bgr = cv2.imread(image_path)
+    if image_bgr is None:
+        sys.exit(f"Cannot read image: {image_path}")
+    logger.info(f"Loaded image {image_path}  ({image_bgr.shape[1]}×{image_bgr.shape[0]})")
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save a copy of the input
+    cv2.imwrite(str(out_dir / "input.png"), image_bgr)
+    logger.info(f"Saved input image → {out_dir}/input.png")
+
+    inp, orig_h, orig_w = preprocess(image_bgr, img_size)
+    logger.info(f"Preprocessed input shape: {inp.shape}")
+
+    t0 = time.perf_counter()
+    results = compiled_model(inp)
+    dt = time.perf_counter() - t0
+    logger.info(f"OpenVINO inference: {dt * 1000:.1f} ms")
+
+    alpha_out = results[0]  # [1, 1, img_size, img_size]  float32 [0,1]
+    fg_out = results[1]  # [1, 3, img_size, img_size]  float32 [0,1]
+
+    alpha_u8, fg_u8, comp_u8 = postprocess(alpha_out, fg_out, orig_h, orig_w)
+
+    cv2.imwrite(str(out_dir / "alpha.png"), alpha_u8)
+    cv2.imwrite(str(out_dir / "foreground.png"), fg_u8)
+    cv2.imwrite(str(out_dir / "composite.png"), comp_u8)
+    logger.info(f"Results saved to {out_dir}/")
 
 
 # ---------------------------------------------------------------------------
@@ -390,9 +429,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="CorridorKey → OpenVINO export & inference")
     parser.add_argument("--image", type=str, default=None, help="Path to a green-screen image (BGR)")
     parser.add_argument("--video", type=str, default=None, help="Path to a green-screen video")
-    parser.add_argument("--img-size", type=int, default=DEFAULT_IMG_SIZE, help="Model resolution (default 1024)")
-    parser.add_argument("--output-dir", type=str, default="output", help="Directory for result images/videos")
-    parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Where to store the .pth file")
+    parser.add_argument(
+        "--img-size",
+        type=int,
+        default=DEFAULT_IMG_SIZE,
+        help="Model resolution (default 1024)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="output",
+        help="Directory for result images/videos",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default="checkpoints",
+        help="Where to store the .pth file",
+    )
     parser.add_argument("--ir-dir", type=str, default="ir", help="Where to store the OpenVINO IR model")
     parser.add_argument("--device", type=str, default="CPU", help="OpenVINO device (CPU, GPU, NPU)")
     args = parser.parse_args()
@@ -403,7 +457,7 @@ def main() -> None:
 
     # ---- Step 1–3: Reuse existing IR or export from scratch ----
     if ir_path.exists():
-        logger.info("OpenVINO IR already exists: %s — skipping download & export", ir_path)
+        logger.info(f"OpenVINO IR already exists: {ir_path} — skipping download & export")
         torch_model = None
     else:
         # Download checkpoint
@@ -415,78 +469,33 @@ def main() -> None:
 
     # ---- Step 4: Load OpenVINO model ----
     core = ov.Core()
-    logger.info("Loading OpenVINO model on device=%s …", args.device)
+    logger.info(f"Loading OpenVINO model on device={args.device} …")
     compiled = core.compile_model(str(ir_path), args.device)
 
     # ---- Step 5: Run on image or video ----
-    is_video = args.video is not None or args.image is None
-
-    if args.image:
-        # ---------- Single-image path ----------
-        image_bgr = cv2.imread(args.image)
-        if image_bgr is None:
-            sys.exit(f"Cannot read image: {args.image}")
-        logger.info("Loaded image %s  (%d×%d)", args.image, image_bgr.shape[1], image_bgr.shape[0])
-
-        # Save a copy of the input image to the output directory
-        out_dir = Path(args.output_dir)
+    out_dir = Path(args.output_dir)
+    if args.video is None and args.image is None:
+        # No input supplied — generate a synthetic green-screen image as a demo
+        logger.info("No --image/--video supplied → generating synthetic green-screen image")
         out_dir.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(out_dir / "input.png"), image_bgr)
-        logger.info("Saved input image → %s/input.png", out_dir)
+        image_path = str(out_dir / "synthetic_input.png")
+        cv2.imwrite(image_path, make_synthetic_greenscreen())
+        logger.info(f"Saved synthetic image → {image_path}")
+        args.image = image_path
 
-        inp, orig_h, orig_w = preprocess(image_bgr, args.img_size)
-        logger.info("Preprocessed input shape: %s", inp.shape)
-
-        t0 = time.perf_counter()
-        results = compiled(inp)
-        dt = time.perf_counter() - t0
-        logger.info("OpenVINO inference: %.1f ms", dt * 1000)
-
-        # Sigmoid is already included in the graph (verified via IR inspection).
-        alpha_out = results[0]  # [1, 1, img_size, img_size]  float32 [0,1]
-        fg_out = results[1]  # [1, 3, img_size, img_size]  float32 [0,1]
-
-        alpha_u8, fg_u8, comp_u8 = postprocess(alpha_out, fg_out, orig_h, orig_w)
-
-        out_dir = Path(args.output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(out_dir / "alpha.png"), alpha_u8)
-        cv2.imwrite(str(out_dir / "foreground.png"), fg_u8)
-        cv2.imwrite(str(out_dir / "composite.png"), comp_u8)
-        logger.info("Results saved to %s/", out_dir)
-
-        # PyTorch comparison (only when the model was loaded during this run)
-        if torch_model is not None:
-            logger.info("Running PyTorch inference for comparison …")
-            inp_t = torch.from_numpy(inp)
-            with torch.inference_mode():
-                t0 = time.perf_counter()
-                pt_out = torch_model(inp_t)
-                dt = time.perf_counter() - t0
-            logger.info("PyTorch inference: %.1f ms", dt * 1000)
-
-            pt_alpha = pt_out["alpha"].numpy()
-            pt_fg = pt_out["fg"].numpy()
-            pt_alpha_u8, pt_fg_u8, pt_comp_u8 = postprocess(pt_alpha, pt_fg, orig_h, orig_w)
-
-            cv2.imwrite(str(out_dir / "alpha_pytorch.png"), pt_alpha_u8)
-            cv2.imwrite(str(out_dir / "foreground_pytorch.png"), pt_fg_u8)
-            cv2.imwrite(str(out_dir / "composite_pytorch.png"), pt_comp_u8)
-            logger.info("PyTorch comparison results saved to %s/", out_dir)
-
-            alpha_diff = np.abs(alpha_out[0, 0] - pt_alpha[0, 0]).mean()
-            fg_diff = np.abs(fg_out - pt_fg).mean()
-            logger.info("Mean |alpha_ov - alpha_pt| = %.6f", alpha_diff)
-            logger.info("Mean |fg_ov    - fg_pt|    = %.6f", fg_diff)
-        else:
-            logger.info("PyTorch comparison skipped (using cached IR)")
-    else:
-        # ---------- Video path (explicit --video or default synthetic) ----------
+    if args.video:
         process_video(
             video_path=args.video,
             compiled_model=compiled,
             img_size=args.img_size,
-            output_dir=Path(args.output_dir),
+            output_dir=out_dir,
+        )
+    elif args.image:
+        process_image(
+            image_path=args.image,
+            compiled_model=compiled,
+            img_size=args.img_size,
+            output_dir=out_dir,
         )
 
     logger.info("Done ✓")

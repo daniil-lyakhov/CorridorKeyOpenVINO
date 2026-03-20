@@ -2,10 +2,6 @@
 #
 # Install with:
 #   pip install -r requirements.txt
-#
-# The CorridorKey model code is provided via a git submodule
-# (pinned to commit 92dda57 — 2026-03-19).
-# Clone with --recursive or run: git submodule update --init --recursive
 
 # CorridorKey model dependencies
 torch==2.10.0
@@ -18,3 +14,4 @@ openvino==2026.0.0
 
 # Notebook extras
 matplotlib==3.10.8
+pandas==2.3.3

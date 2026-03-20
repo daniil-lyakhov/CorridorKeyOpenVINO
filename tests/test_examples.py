@@ -14,7 +14,6 @@ What is tested:
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,7 +21,6 @@ import cv2
 import numpy as np
 import pytest
 import torch
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -140,24 +138,6 @@ class TestSyntheticGeneration:
         assert img.shape == (120, 160, 3)
         assert img.dtype == np.uint8
 
-    def test_synthetic_video_length(self, script):
-        frames = script.make_synthetic_greenscreen_video(n_frames=5, h=64, w=96)
-        assert len(frames) == 5
-        assert frames[0].shape == (64, 96, 3)
-
-    def test_synthetic_video_has_green(self, script):
-        """Generated frames should have a predominantly green background."""
-        # Use a large enough frame so the person doesn't cover everything
-        frames = script.make_synthetic_greenscreen_video(n_frames=1, h=720, w=1280)
-        frame = frames[0]
-        # BGR: green channel (idx 1) should be dominant over both blue (idx 0)
-        # and red (idx 2) in most pixels (the background is bright green)
-        g = frame[:, :, 1].astype(float)
-        r = frame[:, :, 2].astype(float)
-        b = frame[:, :, 0].astype(float)
-        green_dominant = (g > r) & (g > b)
-        assert green_dominant.mean() > 0.5  # most of the frame is green BG
-
 
 # ---------------------------------------------------------------------------
 # Export + inference pipeline (with tiny model)
@@ -232,17 +212,26 @@ class TestVideoProcessing:
 
         mock_compiled = MagicMock(side_effect=mock_infer)
 
+        # Write a small synthetic video to disk
+        vid_path = str(tmp_path / "test_input.mp4")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(vid_path, fourcc, 30, (96, 64))
+        for _ in range(3):
+            writer.write(script.make_synthetic_greenscreen(h=64, w=96))
+        writer.release()
+
+        out_dir = tmp_path / "out"
         script.process_video(
-            video_path=None,  # synthetic
+            video_path=vid_path,
             compiled_model=mock_compiled,
             img_size=32,
-            output_dir=tmp_path,
+            output_dir=out_dir,
         )
 
-        assert (tmp_path / "input.mp4").exists()
-        assert (tmp_path / "alpha.mp4").exists()
-        assert (tmp_path / "foreground.mp4").exists()
-        assert (tmp_path / "composite.mp4").exists()
+        assert (out_dir / "input.mp4").exists()
+        assert (out_dir / "alpha.mp4").exists()
+        assert (out_dir / "foreground.mp4").exists()
+        assert (out_dir / "composite.mp4").exists()
 
     def test_process_video_calls_model_per_frame(self, script, tmp_path):
         """Model should be called once per frame."""
@@ -256,15 +245,12 @@ class TestVideoProcessing:
 
         mock_compiled = MagicMock(side_effect=mock_infer)
 
-        # Manually create frames to control count
-        frames = script.make_synthetic_greenscreen_video(n_frames=n_frames, h=32, w=48)
-
-        # Write a temporary video from frames
+        # Write a temporary video from synthetic frames
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         vid_path = str(tmp_path / "test_input.mp4")
         writer = cv2.VideoWriter(vid_path, fourcc, 30, (48, 32))
-        for f in frames:
-            writer.write(f)
+        for _ in range(n_frames):
+            writer.write(script.make_synthetic_greenscreen(h=32, w=48))
         writer.release()
 
         out_dir = tmp_path / "out"
@@ -292,7 +278,7 @@ class TestNotebookExecution:
 
     def test_notebook_executes_without_error(self, tmp_path):
         """The examples notebook must execute without raising exceptions."""
-        nbconvert = pytest.importorskip("nbconvert")
+        pytest.importorskip("nbconvert")
         nbformat = pytest.importorskip("nbformat")
 
         nb_path = EXAMPLES_DIR / "corridorkey_openvino.ipynb"

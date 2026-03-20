@@ -2,8 +2,6 @@
 
 import numpy as np
 import pytest
-import torch
-
 
 # ---------------------------------------------------------------------------
 # Basic frame/mask fixtures
@@ -24,4 +22,3 @@ def sample_mask():
     mask = rng.random((64, 64), dtype=np.float32)
     # Make it more mask-like: threshold to create distinct FG/BG regions
     return (mask > 0.5).astype(np.float32)
-
