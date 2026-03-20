@@ -4,7 +4,7 @@ Export the [CorridorKey](https://github.com/nikopueringer/CorridorKey) green-scr
 
 ## Requirements
 
-- **Python 3.10** (tested with 3.10.0)
+- **Python 3.12**
 
 Everything is listed in `requirements.txt`, so a single `pip install` covers it all.
 
@@ -19,12 +19,12 @@ cd CorridorKeyOpenVINO
 #   git submodule update --init
 
 # 2. Create a venv and install dependencies
-python3.10 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate        # Linux / macOS
 # .venv\Scripts\activate         # Windows
 pip install -r requirements.txt
 
-# 3. Run the demo (processes a synthetic green-screen video)
+# 3. Run the demo (processes a synthetic green-screen image)
 python export_and_run_openvino.py --img-size 512
 
 # …or open the notebook for a step-by-step walkthrough
